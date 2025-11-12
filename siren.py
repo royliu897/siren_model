@@ -50,4 +50,3 @@ class Siren(nn.Module):
         for layer in self.net:
             x=layer(x)
         return self.final_linear(x)
-            
