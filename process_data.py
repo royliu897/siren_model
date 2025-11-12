@@ -6,6 +6,8 @@ from torch.utils.data import Dataset, DataLoader
 
 class ScatteringDataset(Dataset):
     def __init__(self, data_dir):
+        if data_dir is None:
+            data_dir = os.path.join(os.environ["WORK"], "data_generate", "data", "nips_prelim", "volume3")
         self.samples = []
         for fname in os.listdir(data_dir):
             if not fname.endswith(".h5"):

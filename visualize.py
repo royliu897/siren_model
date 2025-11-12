@@ -7,7 +7,9 @@ import plotly.graph_objects as go
 
 pattern = r"Ax=(-?\d+\.\d+)_Az=(-?\d+\.\d+)_J1a=(-?\d+\.\d+)_J1b=(-?\d+\.\d+)_J2a=(-?\d+\.\d+)_J2b=(-?\d+\.\d+)_J3a=(-?\d+\.\d+)_J3b=(-?\d+\.\d+)_J4=(-?\d+\.\d+)"
 
-def save_axis_slices(model, file_path, energy_idx=50, save_dir="axis_slices", device=None):
+def save_axis_slices(model, file_path, energy_idx=50, save_dir=os.path.expandvars("$WORK/data_generate/axis_slices"), device=None):
+    base_name = os.path.splitext(os.path.basename(file_path))[0]
+    save_dir = os.path.join(save_dir, base_name)
     os.makedirs(save_dir, exist_ok=True)
 
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")

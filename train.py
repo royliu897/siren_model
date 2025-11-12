@@ -3,14 +3,14 @@ import re
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from siren_model import Siren
-from visualize_slices import save_axis_slices
+from siren import Siren
+from visualize import save_axis_slices
 import h5py
 import numpy as np
 
 # ---------------- Config -----------------
-DATA_DIR = "/path/to/data/volume3"
-MODEL_DIR = "trained_models"
+DATA_DIR = os.path.expandvars("$WORK/data_generate/data/nips_prelim/volume3")
+MODEL_DIR = os.path.expandvars("$WORK/data_generate/models")
 os.makedirs(MODEL_DIR, exist_ok=True)
 H5_PATTERN = r"Ax=(-?\d+\.\d+)_Az=(-?\d+\.\d+)_J1a=(-?\d+\.\d+)_J1b=(-?\d+\.\d+)_J2a=(-?\d+\.\d+)_J2b=(-?\d+\.\d+)_J3a=(-?\d+\.\d+)_J3b=(-?\d+\.\d+)_J4=(-?\d+\.\d+)"
 
@@ -54,7 +54,7 @@ class H5SpinDataset(Dataset):
         return self.x[idx], self.y[idx]
 
 # ---------------- Training -----------------
-def train_siren(h5_file, save_model_path, epochs=100, batch_size=1024, lr=1e-4, visualize=True):
+def train(h5_file, save_model_path, epochs=100, batch_size=1024, lr=1e-4, visualize=True):
     dataset = H5SpinDataset(h5_file)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -97,4 +97,4 @@ if __name__ == "__main__":
     for h5_file in h5_files:
         base_name = os.path.splitext(os.path.basename(h5_file))[0]
         model_save_path = os.path.join(MODEL_DIR, f"{base_name}_siren.pt")
-        train_siren(h5_file, save_model_path=model_save_path, epochs=100)
+        train(h5_file, save_model_path=model_save_path, epochs=100)
