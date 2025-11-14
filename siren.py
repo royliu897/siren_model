@@ -49,6 +49,8 @@ class HybridSiren(nn.Module):
         self.fusion = nn.Sequential(
             nn.Linear(coord_hidden + hparam_hidden, fusion_hidden),
             nn.Tanh(),
+            nn.Linear(fusion_hidden, fusion_hidden),
+            nn.Tanh(),
             nn.Linear(fusion_hidden, 1)
         )
 
