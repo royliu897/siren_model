@@ -11,9 +11,9 @@ class PreprocessedScatteringDataset:
 
     def __init__(self, raw_data_dir=None, processed_dir=None):
         if raw_data_dir is None:
-            raw_data_dir = os.path.join(os.environ["WORK"], "data_generate", "data/nips_prelim/volume3")
+            raw_data_dir = os.path.join(os.environ["WORK"], "data_generate", "validation")
         if processed_dir is None:
-            processed_dir = os.path.join(os.environ["WORK"], "data_generate", "processed_nips_prelim/volume3")
+            processed_dir = os.path.join(os.environ["WORK"], "data_generate", "processed_validation")
         os.makedirs(processed_dir, exist_ok=True)
 
         self.raw_data_dir = raw_data_dir
