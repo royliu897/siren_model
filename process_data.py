@@ -94,5 +94,6 @@ class PreprocessedScatteringDataset:
         print(f"Saved {save_x} and {save_y} ({x_tensor.shape[0]} samples)")
 
 if __name__ == "__main__":
-    raw_dir = os.path.join(os.environ["WORK"], "data_generate", "data/nips_prelim/volume3")
-    processed_dir = os.path.join(os.environ["WORK"], "data_generate", "processed_nips_prelim/volume3")
+    raw_dir = os.path.join(os.environ["WORK"], "data_generate", "validation")
+    processed_dir = os.path.join(os.environ["WORK"], "data_generate", "processed_validation")
+    dataset = PreprocessedScatteringDataset(raw_data_dir=raw_dir, processed_dir=processed_dir)
