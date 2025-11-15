@@ -62,7 +62,7 @@ end
 N_HAM = 50           # number of Hamiltonians
 N_COORDS = 100_000   # points per Hamiltonian
 Ax, Az, J2a, J2b, J4 = -0.01, 0.21, 0.2, 0.2, -0.38
-outdir = joinpath(ENV["WORK"], "data_generate", "data")
+outdir = joinpath(ENV["WORK"], "data_generate", "data", "4d_only")
 mkpath(outdir)
 
 # --- Parallel loop ---

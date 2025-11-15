@@ -10,8 +10,8 @@ import numpy as np
 from tqdm import tqdm
 
 # ---------------- Config -----------------
-DATA_DIR = os.path.expandvars("$WORK/data_generate/data")
-MODEL_DIR = os.path.expandvars("$WORK/data_generate/models")
+DATA_DIR = os.path.expandvars("$WORK/data_generate/data/4d_only")
+MODEL_DIR = os.path.expandvars("$WORK/data_generate/4d_models")
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 H5_PATTERN = r"J1a=(-?\d+\.\d+)_J1b=(-?\d+\.\d+)_J3a=(-?\d+\.\d+)_J3b=(-?\d+\.\d+)"
