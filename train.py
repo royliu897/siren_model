@@ -1,134 +1,144 @@
 import os
+import re
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
-from siren import HybridSiren
+from torch.utils.data import Dataset, DataLoader, random_split
+from siren import Siren
 from visualize import save_axis_slices
-
-# ---------------- Loss functions -----------------
-def log_mse_loss(y_pred, y_true, eps=1e-6):
-    """Log-scaled MSE for better peak representation."""
-    log_pred = torch.log1p(torch.relu(y_pred) + eps)
-    log_true = torch.log1p(torch.relu(y_true) + eps)
-    return torch.mean((log_pred - log_true) ** 2)
-
-def second_derivative_loss(y_pred, coords, axis_dim=-1):
-    """
-    Encourage sharp peak fitting by penalizing curvature.
-    Computes finite difference along the last axis (typically energy).
-    coords: [N,4] tensor of (QA,QB,QC,E)
-    axis_dim: dimension along which to compute second derivative
-    """
-    # Assuming data is sorted along axis_dim
-    # approximate d2y/dx2 ~ y[i+1] - 2*y[i] + y[i-1]
-    y = y_pred.view(-1)
-    d2y = y[2:] - 2 * y[1:-1] + y[:-2]
-    return torch.mean(d2y ** 2)
-
-def mae_loss(y_pred, y_true):
-    return torch.mean(torch.abs(y_pred - y_true))
-
+import h5py
+import numpy as np
+from tqdm import tqdm
 
 # ---------------- Config -----------------
-PROCESSED_DIR = os.path.expandvars("$WORK/data_generate/processed_nips_prelim/volume3")
+DATA_DIR = os.path.expandvars("$WORK/data_generate/data")
 MODEL_DIR = os.path.expandvars("$WORK/data_generate/models")
 os.makedirs(MODEL_DIR, exist_ok=True)
 
+H5_PATTERN = r"J1a=(-?\d+\.\d+)_J1b=(-?\d+\.\d+)_J3a=(-?\d+\.\d+)_J3b=(-?\d+\.\d+)"
+
+# ---------------- Dataset -----------------
+class H5SpinDataset(Dataset):
+    def __init__(self, file_path):
+        with h5py.File(file_path, 'r') as f:
+            qa = np.array(f['qa'])   # was 'qa_range'
+            qb = np.array(f['qb'])   # was 'qb_range'
+            qc = np.array(f['qc'])   # was 'qc_range'
+            energies = np.array(f['energies'])
+            data = np.array(f['data'])
+
+        # reshape data
+        data = data.reshape(len(energies), len(qa), len(qb), len(qc))
+        E, QA, QB, QC = np.meshgrid(energies, qa, qb, qc, indexing='ij')
+        coords = np.stack([QA, QB, QC, E], axis=-1).reshape(-1, 4)
+        values = data.reshape(-1, 1)
+
+        # normalize coordinates to [0,1]
+        coords = np.stack([
+            (QA - QA.min()) / (QA.max() - QA.min()),
+            (QB - QB.min()) / (QB.max() - QB.min()),
+            (QC - QC.min()) / (QC.max() - QC.min()),
+            (E - E.min()) / (E.max() - E.min())
+        ], axis=-1).reshape(-1, 4)
+
+        # extract varying Hamiltonians from filename
+        fname = os.path.basename(file_path)
+        match = re.search(H5_PATTERN, fname)
+        if not match:
+            raise ValueError(f"Filename doesn't match expected pattern: {fname}")
+        J1a, J1b, J3a, J3b = map(float, match.groups())
+        hparams = np.array([J1a, J1b, J3a, J3b], dtype=np.float32)
+        hparams /= np.max(np.abs(hparams))  # normalize Hamiltonians
+        hparams = np.repeat(hparams[None, :], len(coords), axis=0)
+
+        # concatenate coordinates + Hamiltonians
+        coords = np.concatenate([coords, hparams], axis=1)  # 4 coords + 4 Hamiltonians = 8D
+
+        # log-scale targets
+        values = np.log1p(values)
+
+        self.x = torch.tensor(coords, dtype=torch.float32)
+        self.y = torch.tensor(values, dtype=torch.float32)
+
+    def __len__(self):
+        return len(self.x)
+
+    def __getitem__(self, idx):
+        return self.x[idx], self.y[idx]
 
 # ---------------- Training -----------------
-def train(x_tensor, y_tensor, save_model_path, epochs=100, batch_size=1024,
-          lr=1e-4, visualize=True, orig_h5_file=None, curvature_weight=1.0):
+def train(h5_file, save_model_path, epochs=100, batch_size=65536, val_split=0.1, lr=1e-4, visualize=True):
+    dataset = H5SpinDataset(h5_file)
+    val_len = int(len(dataset) * val_split)
+    train_len = len(dataset) - val_len
+    train_set, val_set = random_split(dataset, [train_len, val_len])
 
-    dataset = TensorDataset(x_tensor, y_tensor)
-
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=min(16, os.cpu_count() - 1),
-        pin_memory=True,
-        persistent_workers=True,
-    )
+    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True, pin_memory=True)
+    val_loader   = DataLoader(val_set, batch_size=batch_size//2, shuffle=False, pin_memory=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = HybridSiren().to(device)
+    model = Siren(in_features=8, hidden_features=256, hidden_layers=4, out_features=1).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    criterion = nn.MSELoss()
+    scaler = torch.cuda.amp.GradScaler()
 
-    best_loss = float("inf")
+    best_val_loss = float('inf')
+    model.train()
 
     for epoch in range(epochs):
-        running_loss = torch.tensor(0.0, device=device)
-        running_mae  = torch.tensor(0.0, device=device)
-        running_log_debug = torch.tensor(0.0, device=device)
-
-        for x_batch, y_batch in loader:
+        running_loss = 0.0
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", unit="batch")
+        for x_batch, y_batch in pbar:
             x_batch = x_batch.to(device, non_blocking=True)
             y_batch = y_batch.to(device, non_blocking=True)
 
             optimizer.zero_grad()
-            y_pred = model(x_batch)
+            with torch.cuda.amp.autocast():  # mixed precision
+                y_pred = model(x_batch)
+                loss = criterion(y_pred, y_batch)
 
-            # Log-MSE primary loss
-            log_mse = log_mse_loss(y_pred, y_batch)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
-            # Curvature loss (approximate along energy axis, axis=-1 in input coords)
-            curvature = second_derivative_loss(y_pred, x_batch[:,3], axis_dim=-1)
+            running_loss += loss.item() * x_batch.size(0)
+            pbar.set_postfix({'batch_loss': loss.item()})
 
-            # Total loss
-            loss = log_mse + curvature_weight * curvature
-            loss.backward()
-            optimizer.step()
+        scheduler.step()
+        train_loss = running_loss / train_len
 
-            # Debug metrics
-            with torch.no_grad():
-                running_loss += loss.detach() * x_batch.size(0)
-                running_mae += mae_loss(y_pred, y_batch) * x_batch.size(0)
-                running_log_debug += log_mse * x_batch.size(0)
+        # ----------------- Validation -----------------
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for x_val, y_val in val_loader:
+                x_val = x_val.to(device, non_blocking=True)
+                y_val = y_val.to(device, non_blocking=True)
+                with torch.cuda.amp.autocast():
+                    y_pred = model(x_val)
+                    val_loss += criterion(y_pred, y_val).item() * x_val.size(0)
+        val_loss /= val_len
+        model.train()
 
-        epoch_loss = (running_loss / len(dataset)).item()
-        epoch_mae  = (running_mae / len(dataset)).item()
-        epoch_log  = (running_log_debug / len(dataset)).item()
+        print(f"[{os.path.basename(h5_file)}] Epoch {epoch+1}/{epochs}, "
+              f"Train Loss: {train_loss:.6f}, Val Loss: {val_loss:.6f}")
 
-        print(f"Epoch {epoch+1}/{epochs} | "
-              f"TotalLoss={epoch_loss:.6f} | "
-              f"MAE(debug)={epoch_mae:.6f} | "
-              f"LogMSE(debug)={epoch_log:.6f}")
-
-        if epoch_loss < best_loss:
-            best_loss = epoch_loss
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
             torch.save(model.state_dict(), save_model_path)
 
-    print(f"\nTraining complete. Best total loss: {best_loss:.6f}\n")
+    print(f"Training complete for {os.path.basename(h5_file)}. Best Val Loss: {best_val_loss:.6f}")
 
-    # Visualization
-    if visualize and orig_h5_file is not None:
-        save_dir = os.path.join(os.path.dirname(save_model_path), "axis_slices",
-                                os.path.splitext(os.path.basename(orig_h5_file))[0])
-        save_axis_slices(model, orig_h5_file, energy_idx=50, save_dir=save_dir, device=device)
+    if visualize:
+        save_dir = os.path.join(os.path.dirname(save_model_path), "axis_slices", os.path.splitext(os.path.basename(h5_file))[0])
+        save_axis_slices(model, h5_file, energy_idx=50, save_dir=save_dir, device=device)
 
     return model
 
-
 # ---------------- Main Loop -----------------
 if __name__ == "__main__":
-    processed_files = [f for f in os.listdir(PROCESSED_DIR) if f.endswith("_x.pt")]
-    processed_files.sort()
-
-    for x_file in processed_files:
-        base_name = x_file.replace("_x.pt", "")
-        y_file = x_file.replace("_x.pt", "_y.pt")
-
-        x_tensor = torch.load(os.path.join(PROCESSED_DIR, x_file))
-        y_tensor = torch.load(os.path.join(PROCESSED_DIR, y_file))
-
+    h5_files = [os.path.join(DATA_DIR, f) for f in os.listdir(DATA_DIR) if f.endswith(".h5")]
+    for h5_file in h5_files:
+        base_name = os.path.splitext(os.path.basename(h5_file))[0]
         model_save_path = os.path.join(MODEL_DIR, f"{base_name}_siren.pt")
-
-        orig_h5_file = os.path.join(
-            os.environ["WORK"],
-            "data_generate/data/nips_prelim/volume3",
-            f"{base_name}.h5"
-        )
-
-        train(x_tensor, y_tensor, save_model_path=model_save_path,
-              epochs=100, batch_size=1024, orig_h5_file=orig_h5_file,
-              curvature_weight=1.0)
+        train(h5_file, save_model_path=model_save_path, epochs=100)
