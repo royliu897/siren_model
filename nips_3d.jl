@@ -1,119 +1,111 @@
 using DrWatson
 @quickactivate
 
-using Distributed, Sunny, WGLMakie
+using Distributed, Sunny, WGLMakie, HDF5, LinearAlgebra, Random
 addprocs(4)
 
-@everywhere using DrWatson
-@everywhere @quickactivate
-@everywhere using Sunny, LinearAlgebra, HDF5, Random
+@everywhere using DrWatson, Sunny, LinearAlgebra, HDF5, Random
 
-# --- Crystal and system setup ---
+# -------------------
+# Crystal & Hamiltonian
+# -------------------
 @everywhere function nips_crystal()
     latvecs = lattice_vectors(5.8196, 10.084, 6.8959, 90, 106.221, 90)
     positions = [[0, 1/3, 0]]
     Crystal(latvecs, positions, 12)
 end
 
-# --- Generate LHS Hamiltonians ---
-@everywhere function lhs_hamiltonians(n_ham::Int=50, factor::Float64=2.0)
-    # ranges for the 4 varying parameters
-    ranges = [
-        (-2.7*(1-factor/2), -2.7*(1+factor/2)),  # J1a
-        (-2.0*(1-factor/2), -2.0*(1+factor/2)),  # J1b
-        (13.9*(1-factor/2), 13.9*(1+factor/2)),  # J3a
-        (13.9*(1-factor/2), 13.9*(1+factor/2))   # J3b
-    ]
-    step = 1 / n_ham
-    lhs_points = zeros(n_ham, 4)
-    for i in 1:4
-        lhs_points[:,i] = (randperm(n_ham) .- rand(n_ham)) .* step
-        # scale to actual parameter range
-        a,b = ranges[i]
-        lhs_points[:,i] .= a .+ lhs_points[:,i] .* (b - a)
-    end
-    return lhs_points
+@everywhere function generate_parameters(; factor=2, offset=1/2)
+    Ax = -0.01
+    Az = 0.21
+    J1a = -2.7 * (1 + factor*(rand()-offset))
+    J1b = -2.0 * (1 + factor*(rand()-offset))
+    J2a = 0.2
+    J2b = 0.2
+    J3a = 13.9 * (1 + factor*(rand()-offset))
+    J3b = 13.9 * (1 + factor*(rand()-offset))
+    J4 = -0.38
+    return (; Ax, Az, J1a, J1b, J2a, J2b, J3a, J3b, J4)
 end
 
-# --- Build system ---
 @everywhere function nips_system(; Ax, Az, J1a, J1b, J2a, J2b, J3a, J3b, J4)
     crystal = nips_crystal()
     sys = System(crystal, [1 => Moment(; s=1, g=2)], :dipole_uncorrected)
     S = spin_matrices(Inf)
     set_onsite_coupling!(sys, S -> Ax*S[1]^2 + Az*S[3]^2, 1)
-
-    set_exchange!(sys, J1a, Bond(2, 1, [0, 0, 0]))
-    set_exchange!(sys, J1b, Bond(2, 3, [0, 0, 0]))
-
-    set_exchange!(sys, J2a,  Bond(2, 2, [1, 0, 0]))
-    set_exchange!(sys, J2b,  Bond(1, 4, [0, 0, 0]))
-
-    set_exchange!(sys, J3a,  Bond(1, 3, [0, 0, 0]))
-    set_exchange!(sys, J3b,  Bond(2, 3, [1, 0, 0]))
-
-    set_exchange!(sys, J4,  Bond(1, 1, [0, 0, 1]))
-
+    set_exchange!(sys, J1a, Bond(2, 1, [0,0,0]))
+    set_exchange!(sys, J1b, Bond(2, 3, [0,0,0]))
+    set_exchange!(sys, J2a, Bond(2,2,[1,0,0]))
+    set_exchange!(sys, J2b, Bond(1,4,[0,0,0]))
+    set_exchange!(sys, J3a, Bond(1,3,[0,0,0]))
+    set_exchange!(sys, J3b, Bond(2,3,[1,0,0]))
+    set_exchange!(sys, J4, Bond(1,1,[0,0,1]))
     randomize_spins!(sys)
     minimize_energy!(sys; maxiters=10_000)
     return sys
 end
 
-# --- Parameters ---
-N_HAM = 50           # number of Hamiltonians
-N_COORDS = 100_000   # points per Hamiltonian
-Ax, Az, J2a, J2b, J4 = -0.01, 0.21, 0.2, 0.2, -0.38
-outdir = joinpath(ENV["WORK"], "data_generate", "data", "4d_only")
-mkpath(outdir)
+# -------------------
+# Parameters
+# -------------------
+nsamples = 100        # number of Hamiltonians
+npoints = 200         # random points per Hamiltonian
 
-# --- Parallel loop ---
-lhs_points = lhs_hamiltonians(N_HAM)
-pmap(1:N_HAM) do i
+# Define grid for h,k,l,w (full for sampling)
+h_range = range(-1, 1, 50)
+k_range = range(-1, 1, 50)
+l_range = range(-1, 1, 50)
+w_range = range(0, 150, 100)
+
+# -------------------
+# Generate and save
+# -------------------
+all_data = zeros(Float32, nsamples * npoints, 9) # 9 = 4 hamiltonian + 3 hkl + 1 w + 1 S
+
+pmap(1:nsamples) do i
     done = false
     while !done
         try
-            J1a, J1b, J3a, J3b = lhs_points[i,:]
-            params = (; Ax, Az, J1a, J1b, J2a, J2b, J3a, J3b, J4)
+            # Generate Hamiltonian and system
+            params = generate_parameters()
             sys = nips_system(; params...)
 
+            # Spin wave measurement
             measure = ssf_perp(sys; formfactors=[1 => FormFactor("Ni2")])
             swt = SpinWaveTheory(sys; measure=measure, regularization=1e-6)
 
-            # Sample coordinates randomly
-            qa = rand(N_COORDS) .* 2 .- 1
-            qb = rand(N_COORDS) .* 2 .- 1
-            qc = rand(N_COORDS) .* 2 .- 1
-            E  = rand(N_COORDS) .* 150
+            # Sample random points from the 4D grid
+            h_idx = rand(1:length(h_range), npoints)
+            k_idx = rand(1:length(k_range), npoints)
+            l_idx = rand(1:length(l_range), npoints)
+            w_idx = rand(1:length(w_range), npoints)
 
-            qs_lab = [ [a,b,c] for (a,b,c) in zip(qa,qb,qc) ]
-
-            # Compute intensities
-            kernel = gaussian(; fwhm=4)
-            rotations = [([0,0,1], π/3), ([0,0,1], 2π/3), ([0,0,1], 0.0)]
-            weights = [1,1,1]
-
-            res = domain_average(sys.crystal, qs_lab; rotations=rotations, weights=weights) do path_rotated
-                intensities(swt, path_rotated; energies=E, kernel)
+            for j in 1:npoints
+                q_lab = [h_range[h_idx[j]], k_range[k_idx[j]], l_range[l_idx[j]]]
+                q = inv(sys.crystal.recipvecs) * q_lab
+                energy = w_range[w_idx[j]]
+                intensity = intensities(swt, [q]; energies=[energy], kernel=gaussian(fwhm=4))[1]
+                # store as: Ax, Az, J1a, J1b, h, k, l, w, S
+                all_data[(i-1)*npoints + j, :] = Float32[
+                    params.Ax, params.Az, params.J1a, params.J1b,
+                    q_lab[1], q_lab[2], q_lab[3], energy, intensity
+                ]
             end
-
-            # Save to H5
-            filename = "J1a=$(round(J1a,digits=3))_J1b=$(round(J1b,digits=3))_J3a=$(round(J3a,digits=3))_J3b=$(round(J3b,digits=3)).h5"
-            filepath = joinpath(outdir, filename)
-            h5open(filepath, "w") do f
-                f["qa"] = qa
-                f["qb"] = qb
-                f["qc"] = qc
-                f["E"]  = E
-                f["J1a"] = fill(J1a, N_COORDS)
-                f["J1b"] = fill(J1b, N_COORDS)
-                f["J3a"] = fill(J3a, N_COORDS)
-                f["J3b"] = fill(J3b, N_COORDS)
-                f["data"] = res.data
-            end
-
             done = true
         catch e
-            println("\nFAILED SAMPLE. Retrying...\n")
+            println("Sample failed, retrying...")
             println(e)
         end
     end
 end
+
+# Save everything in one file
+outdir = joinpath(ENV["WORK"], "data_generate", "4d_data")
+mkpath(outdir)
+filepath = joinpath(outdir, "nips_100h_200pts.h5")
+
+h5open(filepath, "w") do file
+    write(file, "data", all_data)
+end
+
+println("Saved all data to $filepath")

@@ -5,7 +5,7 @@ import torch.nn as nn
 class SineLayer(nn.Module): #inherits from nn.Module
     
     #in_features: numeber of input neurons, out_features: number of output neurons, omega_0: frequency scaling factor, is_first: if is the first layer
-    def __init__(self, in_features=8, out_features, omega_0=30, is_first=False):
+    def __init__(self, in_features, out_features, omega_0=30, is_first=False):
         super().__init__() #required parent constructor call
         self.in_features = in_features
         self.is_first = is_first
